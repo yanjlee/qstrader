@@ -68,19 +68,28 @@ class FixedWeightPCM(PortfolioConstructionModel):
     transaction_cost_model : TransactionCostModel, optional
         A handle to the TransactionCostModel which governs estimates
         of transaction costs for purposes of estimating trade profits
+    reblance_times : TODO: Add class description in!
+    adjustment_factor : float, optional
+        The total percentage (between 0.0 and 1.0) of the portfolio to
+        allocate away from cash. That is, if adjustment_factor=0.99,
+        1% of the portfolio remains in cash.
     """
 
     def __init__(
         self, start_dt, broker,
         broker_portfolio_id, risk_model=None,
-        transaction_cost_model=None
+        transaction_cost_model=None,
+        rebalance_times=None,
+        adjustment_factor=1.0
     ):
         super().__init__(
             start_dt, broker,
             broker_portfolio_id,
             risk_model=risk_model,
-            transaction_cost_model=transaction_cost_model
+            transaction_cost_model=transaction_cost_model,
+            rebalance_times=rebalance_times
         )
+        self.adjustment_factor = adjustment_factor
 
     def _check_all_forecasts(self, forecasts):
         """
@@ -108,8 +117,8 @@ class FixedWeightPCM(PortfolioConstructionModel):
         provided Forecasts that rescales the forecast 'values' if they
         do not sum to 1.0.
         """
-        # Obtain the current portfolio market value
-        port_market_value = self.broker.get_portfolio_total_market_value(
+        # Obtain the current portfolio equity
+        port_equity = self.broker.get_portfolio_total_equity(
             self.broker_portfolio_id
         )
 
@@ -126,7 +135,7 @@ class FixedWeightPCM(PortfolioConstructionModel):
         for forecast in self.forecasts:
             asset = forecast.asset
             asset_weight = scaled_forecast_weights[asset]
-            pc_dollar_weight = port_market_value * asset_weight
+            pc_dollar_weight = port_equity * asset_weight
             # Calculate tax and commission for this asset
             # (note some assets are tax free)
             est_commission = self.transaction_cost_model._calc_commission(
@@ -141,7 +150,11 @@ class FixedWeightPCM(PortfolioConstructionModel):
             asset_market_value = self.broker.get_latest_asset_price(asset)[1]  # Ask
             alpha_portfolio[asset] = {
                 "quantity": int(
-                    math.floor(ac_dollar_weight / asset_market_value)
+                    math.floor(
+                        (
+                            ac_dollar_weight * self.adjustment_factor
+                        ) / asset_market_value
+                    )
                 )
             }
 

@@ -20,35 +20,26 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from abc import ABCMeta, abstractmethod
 
-class QuantitativeTradingAlgorithm(object):
-    """TODO: Add docstring!
+
+class RebalanceException(Exception):
+    pass
+
+
+class Rebalance(object):
+    """This abstract class provides an interface to a
+    generic list of rebalance timestamps, which are attached
+    to a PortfolioConstructionModel.
     """
 
-    def __init__(
-        self, start_dt,
-        broker, broker_portfolio_id,
-        alpha_models, pcm
-    ):
-        self.start_dt = start_dt
-        self.broker = broker
-        self.broker_portfolio_id = broker_portfolio_id
-        self.alpha_models = alpha_models
-        self.pcm = pcm
+    __metaclass__ = ABCMeta
 
-    def update(self, dt):
-        # Create the list of forecasts from AlphaModels
-        forecasts = []
-        for alpha in self.alpha_models:
-            alpha.update(dt)
-            forecast = alpha.forecast()
-            forecasts.append(forecast)
+    def __init__(self):
+        pass
 
-        # Generate the list of orders
-        self.pcm.update(dt)
-        order_list = self.pcm.generate_orders(forecasts)
-        order_list = sorted(order_list, key=lambda x: x.quantity)
-
-        # Send the orders to the broker
-        for order in order_list:
-            self.broker.submit_order(self.broker_portfolio_id, order)
+    @abstractmethod
+    def output_rebalances(self):
+        raise NotImplementedError(
+            "Should implement output_rebalances()"
+        )

@@ -20,7 +20,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import collections
+import logging
+import queue
 
 import numpy as np
 
@@ -79,6 +80,13 @@ class SimulatedBroker(Broker):
         self.cash_balances = self._set_cash_balances()
         self.portfolios = self._set_initial_portfolios()
         self.open_orders = self._set_initial_open_orders()
+
+        self.logger = logging.getLogger('SimulatedBroker')
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.info(
+            '(%s) SimulatedBroker instance initialised' %
+            self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"])
+        )
 
     def _set_base_currency(self, base_currency):
         """
@@ -168,6 +176,12 @@ class SimulatedBroker(Broker):
                 "'%s' to the broker account." % amount
             )
         self.cash_balances[self.base_currency] += amount
+        self.logger.info(
+            '(%s) %0.2f subscribed to broker account "%s"' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                amount, self.account_id
+            )
+        )
 
     def withdraw_funds_from_account(self, amount):
         """
@@ -190,6 +204,12 @@ class SimulatedBroker(Broker):
                 )
             )
         self.cash_balances[self.base_currency] -= amount
+        self.logger.info(
+            '(%s) %0.2f withdrawn from broker account "%s"' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                amount, self.account_id
+            )
+        )
 
     def get_account_cash_balance(self, currency=None):
         """
@@ -224,6 +244,22 @@ class SimulatedBroker(Broker):
         tmv_dict["master"] = master_tmv
         return tmv_dict
 
+    def get_account_total_equity(self):
+        """
+        Retrieve the total equity of the account, across
+        each portfolio.
+        """
+        equity_dict = {}
+        master_equity = 0.0
+        for portfolio in self.portfolios.values():
+            port_equity = self.get_portfolio_total_equity(
+                portfolio.portfolio_id
+            )
+            equity_dict[portfolio.portfolio_id] = port_equity
+            master_equity += port_equity
+        equity_dict["master"] = master_equity
+        return equity_dict
+
     def create_portfolio(self, portfolio_id, name=None):
         """
         Create a new sub-portfolio with ID 'portfolio_id' and
@@ -243,7 +279,13 @@ class SimulatedBroker(Broker):
                 name=name
             )
             self.portfolios[portfolio_id_str] = p
-            self.open_orders[portfolio_id_str] = collections.deque()
+            self.open_orders[portfolio_id_str] = queue.Queue()
+            self.logger.info(
+                '(%s) Portfolio "%s" created at broker "%s"' % (
+                    self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                    portfolio_id_str, self.account_id
+                )
+            )
 
     def list_all_portfolios(self):
         """
@@ -284,6 +326,12 @@ class SimulatedBroker(Broker):
             )
         self.portfolios[portfolio_id].subscribe_funds(self.cur_dt, amount)
         self.cash_balances[self.base_currency] -= amount
+        self.logger.info(
+            '(%s) %0.2f subscribed to portfolio "%s"' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                amount, portfolio_id
+            )
+        )
 
     def withdraw_funds_from_portfolio(self, portfolio_id, amount):
         """
@@ -317,6 +365,12 @@ class SimulatedBroker(Broker):
             self.cur_dt, amount
         )
         self.cash_balances[self.base_currency] += amount
+        self.logger.info(
+            '(%s) %0.2f withdrawn from portfolio "%s"' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                amount, portfolio_id
+            )
+        )
 
     def get_portfolio_cash_balance(self, portfolio_id):
         """
@@ -342,7 +396,20 @@ class SimulatedBroker(Broker):
                 "Cannot return total market value for a "
                 "non-existent portfolio." % portfolio_id
             )
-        return self.portfolios[portfolio_id].total_value
+        return self.portfolios[portfolio_id].total_securities_value
+
+    def get_portfolio_total_equity(self, portfolio_id):
+        """
+        Returns the current total equity of a Portfolio
+        with ID 'portfolio_id'.
+        """
+        if portfolio_id not in self.portfolios.keys():
+            raise BrokerException(
+                "Portfolio with ID '%s' does not exist. "
+                "Cannot return total equity for a "
+                "non-existent portfolio." % portfolio_id
+            )
+        return self.portfolios[portfolio_id].total_equity
 
     def get_portfolio_as_dict(self, portfolio_id):
         """
@@ -377,28 +444,10 @@ class SimulatedBroker(Broker):
         else:
             return bid_ask
 
-    def submit_order(self, portfolio_id, order):
+    def _execute_order(self, portfolio_id, order):
         """
-        Execute an Order instance against the sub-portfolio
-        with ID 'portfolio_id'. For the SimulatedBroker class
-        specifically there are no restrictions on this occuring
-        beyond having sufficient cash in the sub-portfolio to
-        allow this to occur.
-
-        This does not take into settlement dates, as with most
-        brokerage accounts. The cash is taken immediately upon
-        entering a long position and returned immediately upon
-        closing out the position.
+        TODO: Fill in doc string!
         """
-        # Check that the portfolio actually exists
-        if portfolio_id not in self.portfolios.keys():
-            raise BrokerException(
-                "Portfolio with ID '%s' does not exist. Order with "
-                "ID '%s' was not executed." % (
-                    portfolio_id, order.order_id
-                )
-            )
-
         # Obtain a price for the asset, if no price then
         # raise a BrokerException
         price_err_msg = "Could not obtain a latest market price for " \
@@ -427,6 +476,45 @@ class SimulatedBroker(Broker):
             price, order.order_id, commission=total_commission
         )
         self.portfolios[portfolio_id].transact_asset(txn)
+        self.logger.info(
+            '(%s) Order executed for %s - Qty: %s, '
+            'Price: %0.2f, Consideration: %0.2f, '
+            'Commission: %0.2f, Total Cost: %0.2f' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                order.asset.symbol, order.quantity,
+                price, consideration, total_commission,
+                consideration + total_commission
+            )
+        )
+
+    def submit_order(self, portfolio_id, order):
+        """
+        Execute an Order instance against the sub-portfolio
+        with ID 'portfolio_id'. For the SimulatedBroker class
+        specifically there are no restrictions on this occuring
+        beyond having sufficient cash in the sub-portfolio to
+        allow this to occur.
+
+        This does not take into settlement dates, as with most
+        brokerage accounts. The cash is taken immediately upon
+        entering a long position and returned immediately upon
+        closing out the position.
+        """
+        # Check that the portfolio actually exists
+        if portfolio_id not in self.portfolios.keys():
+            raise BrokerException(
+                "Portfolio with ID '%s' does not exist. Order with "
+                "ID '%s' was not executed." % (
+                    portfolio_id, order.order_id
+                )
+            )
+        self.open_orders[portfolio_id].put(order)
+        self.logger.info(
+            '(%s) Order submitted for %s - Qty: %s' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                order.asset.symbol, order.quantity
+            )
+        )
 
     def update(self, dt):
         """
@@ -443,3 +531,10 @@ class SimulatedBroker(Broker):
                     asset, price, self.cur_dt
                 )
             self.portfolios[portfolio].update(dt)
+
+        # Try to execute orders
+        if self.exchange.is_open_at_datetime(self.cur_dt):
+            for portfolio in self.portfolios:
+                while not self.open_orders[portfolio].empty():
+                    order = self.open_orders[portfolio].get()
+                    self._execute_order(portfolio, order)

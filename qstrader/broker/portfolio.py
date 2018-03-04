@@ -23,12 +23,14 @@
 import datetime
 from collections import namedtuple
 import locale
+import logging
 import math
 import sys
 
 import pandas as pd
 
 from qstrader.broker.position_handler import PositionHandler
+from qstrader import settings
 from qstrader.utils.console import (
     string_colour, GREEN, RED, CYAN, WHITE
 )
@@ -82,8 +84,18 @@ class Portfolio(object):
         self.starting_cash = starting_cash
         self.portfolio_id = portfolio_id
         self.name = name
-        self.total_value = starting_cash
         self.total_cash = starting_cash
+        self.total_securities_value = 0.0
+        self.total_equity = starting_cash
+
+        self.logger = logging.getLogger('Portfolio')
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.info(
+            '(%s) Portfolio "%s" instance initialised' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                self.portfolio_id
+            )
+        )
 
     def _set_currency(self):
         """
@@ -125,7 +137,7 @@ class Portfolio(object):
                 self._currency_format(amount)
             )
         self.total_cash += amount
-        self.total_value += amount
+        self.total_equity += amount
         pe = PortfolioEvent(
             date=dt, type='subscription',
             description="SUBSCRIPTION",
@@ -134,6 +146,14 @@ class Portfolio(object):
         )
         self.history.append(pe)
         self.cur_dt = dt
+        self.logger.info(
+            '(%s) Funds subscribed to portfolio "%s" '
+            '- Credit: %0.2f, Balance: %0.2f' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                self.portfolio_id, round(amount, 2),
+                round(self.total_cash, 2)
+            )
+        )
 
     def withdraw_funds(self, dt, amount):
         """
@@ -163,7 +183,7 @@ class Portfolio(object):
                 )
             )
         self.total_cash -= amount
-        self.total_value -= amount
+        self.total_equity -= amount
         pe = PortfolioEvent(
             date=dt, type='withdrawal',
             description="WITHDRAWAL",
@@ -172,6 +192,14 @@ class Portfolio(object):
         )
         self.history.append(pe)
         self.cur_dt = dt
+        self.logger.info(
+            '(%s) Funds withdrawn from portfolio "%s" '
+            '- Debit: %0.2f, Balance: %0.2f' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                self.portfolio_id, round(amount, 2),
+                round(self.total_cash, 2)
+            )
+        )
 
     def transact_asset(self, transaction):
         """
@@ -186,6 +214,7 @@ class Portfolio(object):
             )
         tn_share_cost = tn.price * tn.quantity
         tn_total_cost = tn_share_cost + tn.commission
+
         if tn_total_cost > self.total_cash:
             raise PortfolioException(
                 'Not enough cash in the portfolio to '
@@ -197,7 +226,8 @@ class Portfolio(object):
             )
         self.pos_handler.transact_position(tn)
         self.total_cash -= tn_total_cost
-        self.total_value -= tn.commission
+        self.total_securities_value += tn_share_cost
+        self.total_equity = self.total_cash + self.total_securities_value
 
         # Form Portfolio history details
         direction = "LONG" if tn.direction > 0 else "SHORT"
@@ -205,12 +235,36 @@ class Portfolio(object):
             direction, tn.quantity, tn.asset.name.upper(),
             tn.price, datetime.datetime.strftime(tn.dt, "%d/%m/%Y")
         )
-        pe = PortfolioEvent(
-            date=tn.dt, type='asset_transaction',
-            description=description,
-            debit=round(tn_total_cost, 2), credit=0.0,
-            balance=round(self.total_cash, 2)
-        )
+        if direction == "LONG":
+            pe = PortfolioEvent(
+                date=tn.dt, type='asset_transaction',
+                description=description,
+                debit=round(tn_total_cost, 2), credit=0.0,
+                balance=round(self.total_cash, 2)
+            )
+            self.logger.info(
+                '(%s) Asset "%s" transacted LONG in portfolio "%s" '
+                '- Debit: %0.2f, Balance: %0.2f' % (
+                    tn.dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                    tn.asset.symbol, self.portfolio_id,
+                    round(tn_total_cost, 2), round(self.total_cash, 2)
+                )
+            )
+        else:
+            pe = PortfolioEvent(
+                date=tn.dt, type='asset_transaction',
+                description=description,
+                debit=0.0, credit=-1.0 * round(tn_total_cost, 2),
+                balance=round(self.total_cash, 2)
+            )
+            self.logger.info(
+                '(%s) Asset "%s" transacted SHORT in portfolio "%s" '
+                '- Credit: %0.2f, Balance: %0.2f' % (
+                    tn.dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                    tn.asset.symbol, self.portfolio_id,
+                    -1.0 * round(tn_total_cost, 2), round(self.total_cash, 2)
+                )
+            )
         self.history.append(pe)
         self.cur_dt = transaction.dt
 
@@ -248,7 +302,7 @@ class Portfolio(object):
         ) / 100.0
 
         self.total_cash += total_div
-        self.total_value += total_div
+        self.total_equity += total_div
         description = "DIVIDEND %s %s %0.2f%s %s" % (
             quantity, asset.name.upper(),
             div_per_share, self.currency,
@@ -262,6 +316,12 @@ class Portfolio(object):
         )
         self.history.append(pe)
         self.cur_dt = dt
+        self.logger.info(
+            '(%s) Cash dividend of %0.2f received by portfolio "%s"' % (
+                self.cur_dt.strftime(settings.LOGGING["DATE_FORMAT"]),
+                total_div, self.portfolio_id
+            )
+        )
 
     def update_market_value_of_asset(
         self, asset, current_trade_price, current_trade_date
@@ -331,7 +391,8 @@ class Portfolio(object):
         """
         port_dict = self.holdings_to_dict()
         port_dict["total_cash"] = self.total_cash
-        port_dict["total_value"] = self.total_value
+        port_dict["total_securities_value"] = self.total_securities_value
+        port_dict["total_equity"] = self.total_equity
         return port_dict
 
     def holdings_to_console(self):
@@ -366,8 +427,8 @@ class Portfolio(object):
         print_row_divider(repeats)
         sys.stdout.write(
             "| Holding | Quantity | Price | Change |"
-            "      Book Cost |   Market Value |       "
-            "     Gain          | \n"
+            "      Book Cost |   Market Value |     "
+            " Unrealised Gain     | \n"
         )
         print_row_divider(repeats)
 
@@ -443,6 +504,5 @@ class Portfolio(object):
         """
         TODO: Fill in this doc string!
         """
-        self.total_value = 0.0
-        self.total_value = self.pos_handler.total_market_value()
-        self.total_value += self.total_cash
+        self.total_securities_value = self.pos_handler.total_market_value()
+        self.total_equity = self.total_securities_value + self.total_cash
